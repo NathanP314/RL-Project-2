@@ -20,7 +20,7 @@ prob = 0.7
 def step(state, action_idx):
     
     # Stochastic action selection
-    if(np.random.uniform(0,1) > prob):
+    if(np.random.uniform(0,1) <= prob):
         # intended action is taken with 0.7 probability
         action = ACTIONS[action_idx]
     else:
