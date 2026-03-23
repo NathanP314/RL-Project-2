@@ -66,3 +66,11 @@ env_grid = np.zeros((GRID_SIZE, GRID_SIZE))
 plot_heatmap(env_grid, "Task 1: Initial Maze Layout (X = Fence, G = Goal)", annot=False)
 
 # Task 2: Policy Evaluation
+def evaluate_policy(policy):
+  print(policy)
+
+np.random.seed(41)
+random_policy = ... # Generate random policy
+U_random = evaluate_policy(random_policy)
+
+plot_heatmap(U_random, "Task 2: Value Function of a Random Policy")
