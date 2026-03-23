@@ -16,10 +16,21 @@ ACTION_SYMBOLS = ['↑', '→', '↓', '←']
 gamma = 0.975
 prob = 0.7
 
+# Task 1: Design the Environment
 def step(state, action_idx):
-    action = ACTIONS[action_idx]
+    
+    # Stochastic action selection
+    if(np.random.uniform(0,1) > prob):
+        # intended action is taken with 0.7 probability
+        action = ACTIONS[action_idx]
+    else:
+        # Randomly select an adjacent action (simulate stochasticity)
+        while action != ACTIONS[action_idx]:
+            action = ACTIONS[np.random.randint(0, 4)]
+            
     new_state = (state[0] + action[0], state[1] + action[1])
-    # Check boundaries
+    
+    # Check boundaries of the grid
     if (0 <= new_state[0] < GRID_SIZE) and (0 <= new_state[1] < GRID_SIZE):
       # Check for fences, all states have -1 penalty except goal state without penalty
         if new_state in FENCES:
@@ -53,3 +64,5 @@ def plot_heatmap(data, title, annot=True, fmt=".1f"):
 # Visualize Task 1
 env_grid = np.zeros((GRID_SIZE, GRID_SIZE))
 plot_heatmap(env_grid, "Task 1: Initial Maze Layout (X = Fence, G = Goal)", annot=False)
+
+# Task 2: Policy Evaluation
