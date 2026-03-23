@@ -13,6 +13,7 @@ ACTIONS = [(-1, 0), (0, 1), (1, 0), (0, -1)]
 ACTION_SYMBOLS = ['↑', '→', '↓', '←']
 
 # Other Constants
+np.random.seed(41) # set np random seed for reproducibility
 gamma = 0.975
 prob = 0.7
 
@@ -24,7 +25,7 @@ def step(state, action_idx):
         # intended action is taken with 0.7 probability
         action = ACTIONS[action_idx]
     else:
-        # Randomly select an adjacent action (simulate stochasticity)
+        # Randomly select an action (simulate stochasticity)
         while action != ACTIONS[action_idx]:
             action = ACTIONS[np.random.randint(0, 4)]
             
@@ -69,8 +70,7 @@ plot_heatmap(env_grid, "Task 1: Initial Maze Layout (X = Fence, G = Goal)", anno
 def evaluate_policy(policy):
   print(policy)
 
-np.random.seed(41)
-random_policy = ... # Generate random policy
+random_policy = np.random.randint(0, 4, size=(GRID_SIZE, GRID_SIZE))  # Generate random policy
 U_random = evaluate_policy(random_policy)
 
 plot_heatmap(U_random, "Task 2: Value Function of a Random Policy")
