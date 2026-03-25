@@ -16,7 +16,7 @@ ACTION_SYMBOLS = ['↑', '→', '↓', '←']
 np.random.seed(41) # set np random seed for reproducibility
 gamma = 0.975
 prob = 0.7
-threshold = 0.001 # try 0.001, 0.01, 0.1
+threshold = 0.01 # try 0.001, 0.01, 0.1
 
 # Task 1: Design the Environment
 def step(state, action_idx):
@@ -65,7 +65,7 @@ def plot_heatmap(data, title, annot=True, fmt=".1f"):
 
 # Visualize Task 1
 env_grid = np.zeros((GRID_SIZE, GRID_SIZE))
-plot_heatmap(env_grid, "Task 1: Initial Maze Layout (X = Fence, G = Goal)", annot=False)
+plot_heatmap(env_grid, "Task 1: Initial Maze Layout (X = Fence, S = Start, G = Goal)", annot=False)
 
 # Task 2: Policy Evaluation
 def evaluate_policy(policy):
