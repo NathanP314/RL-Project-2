@@ -68,7 +68,7 @@ env_grid = np.zeros((GRID_SIZE, GRID_SIZE))
 plot_heatmap(env_grid, "Task 1: Initial Maze Layout (X = Fence, S = Start, G = Goal)", annot=False)
 
 # Task 2: Policy Evaluation
-def evaluate_policy(policy):
+def evaluate_policy(policy, gamma_value):
     V = -1 * np.ones((GRID_SIZE, GRID_SIZE))
     V[GOAL_STATE] = 0  # Goal state has a value of 0
     Running = True
@@ -104,7 +104,7 @@ def evaluate_policy(policy):
                         else:
                             new_state, reward = (i, j), -1  # Out of bounds, stay in place, normal -1 penalty
                         # Update the value function using the Bellman expectation equation
-                        V_new[i, j] += prob * (reward + gamma * V[new_state])
+                        V_new[i, j] += prob * (reward + gamma_value * V[new_state])
         V_old = np.copy(V)
         V = V_new
         norm.append(np.linalg.norm(V_new - V_old))
@@ -114,7 +114,7 @@ def evaluate_policy(policy):
     return V, norm
 
 random_policy = np.random.randint(0, 4, size=(GRID_SIZE, GRID_SIZE))  # Generate random policy
-U_random, norm = evaluate_policy(random_policy)
+U_random, norm = evaluate_policy(random_policy, gamma)
 # Heatmap of Value Function
 plot_heatmap(U_random, "Task 2: Value Function of a Random Policy")
 # Norm Plot for Convergence of Policy Evaluation
@@ -153,7 +153,7 @@ for i in range(GRID_SIZE):
             policy_task3[i, j] = optimal_action((i, j), GOAL_STATE)
 
 # Evaluate and visualize
-U_task3, norm3 = evaluate_policy(policy_task3)
+U_task3, norm3 = evaluate_policy(policy_task3, gamma)
 plot_heatmap(U_task3, "Task 3: Value Function with Optimal Region near Goal")
 
 # Task 4: Policy Improvement
@@ -166,11 +166,15 @@ def policy_improvement(gamma, threshold, max_iterations):
     # Initialize lists for visualization
     norms, V_snapshots, policy_snapshots, snapshot_iters = [], [], [], []
 
+    V_history = []
+    policy_history = []
     for it in range(max_iterations):
         # Policy Evaluation
-        V_new, norm = evaluate_policy(policy)
+        V_new, norm = evaluate_policy(policy, gamma)
         norms.append(np.linalg.norm(V_new - V))
         V = V_new
+        V_history.append(np.copy(V))
+        policy_history.append(np.copy(policy))
 
         # Policy Improvement
         policy_stable = True
@@ -215,16 +219,14 @@ def policy_improvement(gamma, threshold, max_iterations):
                 new_policy[i, j] = best_action
 
         policy = new_policy
-
-        # Save snapshots for visualization
-        if it in [0, max_iterations//2, max_iterations - 1]:
-            V_snapshots.append(np.copy(V))
-            policy_snapshots.append(np.copy(policy))
-            snapshot_iters.append(it)
-
         if norms[-1] < threshold and policy_stable:
             break
-
+    # Always take snapshots at 0, middle, and final iteration
+    total_iterations = len(V_history)
+    snapshot_indices = [0, total_iterations // 2, total_iterations - 1]
+    V_snapshots = [V_history[idx] for idx in snapshot_indices]
+    policy_snapshots = [policy_history[idx] for idx in snapshot_indices]
+    snapshot_iters = snapshot_indices
     return V, policy, norms, V_snapshots, policy_snapshots, snapshot_iters
 
 def plot_policy_arrows(policy, ax):
@@ -257,7 +259,7 @@ for idx, (V_i, pi_i, it) in enumerate(zip(V_snaps, policy_snaps, snap_iters)):
     ax.text(GOAL_STATE[1]+0.5, GOAL_STATE[0]+0.5, 'G', color='white', ha='center', va='center', fontsize=14, weight='bold')
     ax.text(START_STATE[1]+0.5, START_STATE[0]+0.5, 'S', color='white', ha='center', va='center', fontsize=14, weight='bold')
     plot_policy_arrows(pi_i, ax)
-    plt.title(f"Task 4: Value Function & Policy at Iteration {it}")
+    plt.title(f"Task 4: Value Function & Policy at Iteration {it} (gamma=0.975)")
     plt.show()
 
 # Plot norm of value function difference
@@ -279,7 +281,7 @@ for idx, (V_i, pi_i, it) in enumerate(zip(V_snaps2, policy_snaps2, snap_iters2))
     ax.text(GOAL_STATE[1]+0.5, GOAL_STATE[0]+0.5, 'G', color='white', ha='center', va='center', fontsize=14, weight='bold')
     ax.text(START_STATE[1]+0.5, START_STATE[0]+0.5, 'S', color='white', ha='center', va='center', fontsize=14, weight='bold')
     plot_policy_arrows(pi_i, ax)
-    plt.title(f"Task 4: Value Function & Policy at Iteration {it} (gamma = 0.75)")
+    plt.title(f"Task 4: Value Function & Policy at Iteration {it} (gamma=0.75)")
     plt.show()
 
 # Plot norm for gamma=0.75
