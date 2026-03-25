@@ -16,7 +16,7 @@ ACTION_SYMBOLS = ['↑', '→', '↓', '←']
 np.random.seed(41) # set np random seed for reproducibility
 gamma = 0.975
 prob = 0.7
-threshold = 0.01 # try 0.001, 0.01, 0.1
+threshold = 0.001 # try 0.001, 0.01, 0.1
 
 # Task 1: Design the Environment
 def step(state, action_idx):
