@@ -1,4 +1,5 @@
 import numpy as np
+import matplotlib.pyplot as plt
 
 # Environment Constants
 GRID_ROWS = 5
@@ -213,3 +214,63 @@ for i, item in enumerate(optimal_runs, start=1):
         f"Traj {i:02d} | start={item['start']} | steps={steps:02d} | "
         f"return={total_reward:>4d} | reached_goal={reached_goal}"
     )
+
+# Task 2: Q-Learning
+def q_learning(episodes = 100, alpha=0.1, epsilon=0.1):
+    Q_table = np.zeros((GRID_ROWS, GRID_COLS, 4))
+    e_rewards = [] # track rewards per episode for plotting
+    for e in range(episodes): # iterate over number of episodes
+        state = START_STATE
+        total_rewards = 0
+        for step_idx in range(500): # iterate over max 500 steps per episode
+            if state == GOAL_STATE:
+                break
+
+            # Epsilon-greedy action selection
+            if np.random.uniform(0, 1) < epsilon: # with probability episilon, select random action
+                action = np.random.randint(0, 4)
+            else:
+                action = np.argmax(Q_table[state[0], state[1]]) # greedy action with probability 1 - epsilon
+
+            next_state, reward = step(state, action)
+            total_rewards += reward # update total_rewards to reflect this step's reward
+
+            # Q-learning update
+            best_next_q = np.max(Q_table[next_state[0], next_state[1]]) # optimistic update compared to SARSA's realistic update
+            Q_table[state[0], state[1], action] += alpha * (reward + gamma * best_next_q - Q_table[state[0], state[1], action])
+
+            state = next_state
+        e_rewards.append(total_rewards) # append total_rewards for this episode to the e_rewards list for plotting
+    return Q_table, e_rewards
+
+num_episodes = 200
+num_runs = 5
+all_rewards = []
+for e in range(num_runs): # 5 independent runs of q-learning
+    Q_table, rewards = q_learning(episodes=num_episodes)
+    all_rewards.append(rewards)
+
+all_rewards = np.array(all_rewards)
+
+plt.figure(figsize=(10, 6))
+episodes = np.arange(all_rewards.shape[1])
+# plot reward per episode
+for i in range(num_runs):
+    plt.plot(episodes, all_rewards[i], alpha=0.4, label=f'Run {i+1}')
+
+# mean and variance calculation
+mean_rewards = np.mean(all_rewards, axis=0)
+std_rewards = np.std(all_rewards, axis=0)
+# plot mean
+plt.plot(episodes, mean_rewards, label='Mean Reward', color='black', linewidth=2)
+# plot variance
+plt.fill_between(episodes, mean_rewards - std_rewards, mean_rewards + std_rewards, color='black', alpha=0.3, label='Variance') # shaded area for variance
+
+plt.xlabel('Episode')
+plt.ylabel('Total Reward')
+plt.title('Q-Learning Performance')
+plt.legend()
+plt.show()
+
+
+# Task 3: SARSA
