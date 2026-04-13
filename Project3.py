@@ -246,9 +246,11 @@ def q_learning(episodes = 200, alpha=0.1, epsilon=0.1):
 num_episodes = 300
 num_runs = 5
 qall_rewards = []
+q_trained_table = None
 for e in range(num_runs): # 5 independent runs of q-learning
     Q_table, rewards = q_learning(episodes=num_episodes)
     qall_rewards.append(rewards)
+    q_trained_table = np.copy(Q_table)
 
 qall_rewards = np.array(qall_rewards)
 
@@ -308,9 +310,11 @@ def sarsa(episodes = 200, alpha=0.1, epsilon=0.1):
 num_episodes = 300
 num_runs = 5
 sall_rewards = []
+s_trained_table = None
 for e in range(num_runs): # 5 independent runs of sarsa
     Q_table, rewards = sarsa(episodes=num_episodes)
     sall_rewards.append(rewards)
+    s_trained_table = np.copy(Q_table)
 
 sall_rewards = np.array(sall_rewards)
 
@@ -352,3 +356,84 @@ plt.legend()
 plt.show()
 
 # Task 5: Value Functions and Policies
+q_value = np.max(q_trained_table, axis=2)
+q_policy = np.argmax(q_trained_table, axis=2)
+s_value = np.max(s_trained_table, axis=2)
+s_policy = np.argmax(s_trained_table, axis=2)
+
+q_value[GOAL_STATE] = 0
+s_value[GOAL_STATE] = 0
+
+plt.figure(figsize=(8, 6))
+plt.imshow(q_value, cmap='viridis')
+plt.title('Q-Learning: Value Function and Policy')
+plt.xticks(np.arange(GRID_COLS))
+plt.yticks(np.arange(GRID_ROWS))
+plt.gca().set_xticks(np.arange(-0.5, GRID_COLS, 1), minor=True)
+plt.gca().set_yticks(np.arange(-0.5, GRID_ROWS, 1), minor=True)
+plt.gca().grid(which='minor', color='black', linestyle='-', linewidth=1)
+plt.gca().tick_params(which='minor', bottom=False, left=False)
+
+for i in range(GRID_ROWS):
+    for j in range(GRID_COLS):
+        state = (i, j)
+        if state in CLIFF_STATES:
+            plt.text(j, i, 'C', ha='center', va='center', color='red', fontsize=14, weight='bold')
+        elif state == START_STATE:
+            plt.text(j, i, 'S', ha='center', va='center', color='white', fontsize=14, weight='bold')
+        elif state == GOAL_STATE:
+            plt.text(j, i, 'G', ha='center', va='center', color='white', fontsize=14, weight='bold')
+        else:
+            plt.text(j, i, f'{q_value[i, j]:.1f}', ha='center', va='center', color='white', fontsize=9)
+            action = q_policy[i, j]
+            dx, dy = 0, 0
+            if action == 0:
+                dy = -0.3
+            elif action == 1:
+                dx = 0.3
+            elif action == 2:
+                dy = 0.3
+            elif action == 3:
+                dx = -0.3
+            plt.arrow(j, i, dx, dy, head_width=0.12, head_length=0.10, fc='white', ec='white')
+
+plt.colorbar(fraction=0.046, pad=0.04)
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(8, 6))
+plt.imshow(s_value, cmap='viridis')
+plt.title('SARSA: Value Function and Policy')
+plt.xticks(np.arange(GRID_COLS))
+plt.yticks(np.arange(GRID_ROWS))
+plt.gca().set_xticks(np.arange(-0.5, GRID_COLS, 1), minor=True)
+plt.gca().set_yticks(np.arange(-0.5, GRID_ROWS, 1), minor=True)
+plt.gca().grid(which='minor', color='black', linestyle='-', linewidth=1)
+plt.gca().tick_params(which='minor', bottom=False, left=False)
+
+for i in range(GRID_ROWS):
+    for j in range(GRID_COLS):
+        state = (i, j)
+        if state in CLIFF_STATES:
+            plt.text(j, i, 'C', ha='center', va='center', color='red', fontsize=14, weight='bold')
+        elif state == START_STATE:
+            plt.text(j, i, 'S', ha='center', va='center', color='white', fontsize=14, weight='bold')
+        elif state == GOAL_STATE:
+            plt.text(j, i, 'G', ha='center', va='center', color='white', fontsize=14, weight='bold')
+        else:
+            plt.text(j, i, f'{s_value[i, j]:.1f}', ha='center', va='center', color='white', fontsize=9)
+            action = s_policy[i, j]
+            dx, dy = 0, 0
+            if action == 0:
+                dy = -0.3
+            elif action == 1:
+                dx = 0.3
+            elif action == 2:
+                dy = 0.3
+            elif action == 3:
+                dx = -0.3
+            plt.arrow(j, i, dx, dy, head_width=0.12, head_length=0.10, fc='white', ec='white')
+
+plt.colorbar(fraction=0.046, pad=0.04)
+plt.tight_layout()
+plt.show()
