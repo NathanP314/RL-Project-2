@@ -364,27 +364,27 @@ s_policy = np.argmax(s_trained_table, axis=2)
 q_value[GOAL_STATE] = 0
 s_value[GOAL_STATE] = 0
 
-plt.figure(figsize=(8, 6))
-plt.imshow(q_value, cmap='viridis')
-plt.title('Q-Learning: Value Function and Policy')
-plt.xticks(np.arange(GRID_COLS))
-plt.yticks(np.arange(GRID_ROWS))
-plt.gca().set_xticks(np.arange(-0.5, GRID_COLS, 1), minor=True)
-plt.gca().set_yticks(np.arange(-0.5, GRID_ROWS, 1), minor=True)
-plt.gca().grid(which='minor', color='black', linestyle='-', linewidth=1)
-plt.gca().tick_params(which='minor', bottom=False, left=False)
+fig, axes = plt.subplots(1, 2, figsize=(20, 6))
+axes[0].imshow(q_value, cmap='viridis')
+axes[0].set_title('Q-Learning: Value Function and Policy')
+axes[0].set_xticks(np.arange(GRID_COLS))
+axes[0].set_yticks(np.arange(GRID_ROWS))
+axes[0].set_xticks(np.arange(-0.5, GRID_COLS, 1), minor=True)
+axes[0].set_yticks(np.arange(-0.5, GRID_ROWS, 1), minor=True)
+axes[0].grid(which='minor', color='black', linestyle='-', linewidth=1)
+axes[0].tick_params(which='minor', bottom=False, left=False)
 
 for i in range(GRID_ROWS):
     for j in range(GRID_COLS):
         state = (i, j)
         if state in CLIFF_STATES:
-            plt.text(j, i, 'C', ha='center', va='center', color='red', fontsize=14, weight='bold')
+            axes[0].text(j, i, 'C', ha='center', va='center', color='red', fontsize=14, weight='bold')
         elif state == START_STATE:
-            plt.text(j, i, 'S', ha='center', va='center', color='white', fontsize=14, weight='bold')
+            axes[0].text(j, i, 'S', ha='center', va='center', color='white', fontsize=14, weight='bold')
         elif state == GOAL_STATE:
-            plt.text(j, i, 'G', ha='center', va='center', color='white', fontsize=14, weight='bold')
+            axes[0].text(j, i, 'G', ha='center', va='center', color='white', fontsize=14, weight='bold')
         else:
-            plt.text(j, i, f'{q_value[i, j]:.1f}', ha='center', va='center', color='white', fontsize=9)
+            axes[0].text(j, i, f'{q_value[i, j]:.1f}', ha='center', va='center', color='white', fontsize=9)
             action = q_policy[i, j]
             dx, dy = 0, 0
             if action == 0:
@@ -395,33 +395,29 @@ for i in range(GRID_ROWS):
                 dy = 0.3
             elif action == 3:
                 dx = -0.3
-            plt.arrow(j, i, dx, dy, head_width=0.12, head_length=0.10, fc='white', ec='white')
+            axes[0].arrow(j, i, dx, dy, head_width=0.12, head_length=0.10, fc='white', ec='white')
 
-plt.colorbar(fraction=0.046, pad=0.04)
-plt.tight_layout()
-plt.show()
-
-plt.figure(figsize=(8, 6))
-plt.imshow(s_value, cmap='viridis')
-plt.title('SARSA: Value Function and Policy')
-plt.xticks(np.arange(GRID_COLS))
-plt.yticks(np.arange(GRID_ROWS))
-plt.gca().set_xticks(np.arange(-0.5, GRID_COLS, 1), minor=True)
-plt.gca().set_yticks(np.arange(-0.5, GRID_ROWS, 1), minor=True)
-plt.gca().grid(which='minor', color='black', linestyle='-', linewidth=1)
-plt.gca().tick_params(which='minor', bottom=False, left=False)
+fig.colorbar(axes[0].images[0], ax=axes[0], fraction=0.046, pad=0.04)
+axes[1].imshow(s_value, cmap='viridis')
+axes[1].set_title('SARSA: Value Function and Policy')
+axes[1].set_xticks(np.arange(GRID_COLS))
+axes[1].set_yticks(np.arange(GRID_ROWS))
+axes[1].set_xticks(np.arange(-0.5, GRID_COLS, 1), minor=True)
+axes[1].set_yticks(np.arange(-0.5, GRID_ROWS, 1), minor=True)
+axes[1].grid(which='minor', color='black', linestyle='-', linewidth=1)
+axes[1].tick_params(which='minor', bottom=False, left=False)
 
 for i in range(GRID_ROWS):
     for j in range(GRID_COLS):
         state = (i, j)
         if state in CLIFF_STATES:
-            plt.text(j, i, 'C', ha='center', va='center', color='red', fontsize=14, weight='bold')
+            axes[1].text(j, i, 'C', ha='center', va='center', color='red', fontsize=14, weight='bold')
         elif state == START_STATE:
-            plt.text(j, i, 'S', ha='center', va='center', color='white', fontsize=14, weight='bold')
+            axes[1].text(j, i, 'S', ha='center', va='center', color='white', fontsize=14, weight='bold')
         elif state == GOAL_STATE:
-            plt.text(j, i, 'G', ha='center', va='center', color='white', fontsize=14, weight='bold')
+            axes[1].text(j, i, 'G', ha='center', va='center', color='white', fontsize=14, weight='bold')
         else:
-            plt.text(j, i, f'{s_value[i, j]:.1f}', ha='center', va='center', color='white', fontsize=9)
+            axes[1].text(j, i, f'{s_value[i, j]:.1f}', ha='center', va='center', color='white', fontsize=9)
             action = s_policy[i, j]
             dx, dy = 0, 0
             if action == 0:
@@ -432,8 +428,8 @@ for i in range(GRID_ROWS):
                 dy = 0.3
             elif action == 3:
                 dx = -0.3
-            plt.arrow(j, i, dx, dy, head_width=0.12, head_length=0.10, fc='white', ec='white')
+            axes[1].arrow(j, i, dx, dy, head_width=0.12, head_length=0.10, fc='white', ec='white')
 
-plt.colorbar(fraction=0.046, pad=0.04)
-plt.tight_layout()
+fig.colorbar(axes[1].images[0], ax=axes[1], fraction=0.046, pad=0.04)
+fig.tight_layout()
 plt.show()
