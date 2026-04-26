@@ -160,13 +160,21 @@ def build_actor(state_dim, action_dim, hidden_size):
 def reinforce_signal(policy, states, actions, rewards_to_go, avg_rwd, use_avg=False):
     """Vanilla policy-gradient loss weighted by reward-to-go."""
     # TODO: compute  -E[ (R_to_go - baseline?) * log pi(a | s) ]
-    pass
+    log_probs = _log_prob(policy=policy, states=states, actions=actions)
+    if use_avg:
+        advantage = rewards_to_go - avg_rwd
+    else:
+        advantage = rewards_to_go
+    loss = -(advantage * log_probs).mean()
+    return loss
 
 
 def reinforce_rwd_signal(policy, states, actions, rewards):
     """REINFORCE loss using one-step rewards instead of reward-to-go."""
     # TODO: compute  -E[ r_t * log pi(a | s) ].
-    pass
+    log_probs = _log_prob(policy=policy, states=states, actions=actions)
+    loss = -(rewards * log_probs).mean()
+    return loss
 
 
 def train_vpg(
@@ -197,27 +205,37 @@ def train_vpg(
 
     returns_per_epoch = []
     for x in range(epochs):
-        # TODO: 1) roll out to fill a buffer (use collect_data under torch.no_grad)
+        # TODO: 1) roll out to fill a buffer (use collaect_data under torch.no_grad)
         #       2) buffer.calc_reward_to_go()
         with torch.no_grad():
-            buffer, avg_rwd = None, None  # TODO
-
+            buffer, avg_step_reward, avg_episode_reward = collect_data(episodes * episode_len, env=env, agent=policy)  # TODO
+        buffer.calc_reward_to_go(gamma)
         for i in range(updates):
             # TODO: You need to sample from the buffer here
             # TODO: After sampling you need to convert numpy arrays to tensors, Example: "s_t = torch.as_tensor(s, dtype=torch.float32)"
+            states, actions, rewards, _, _, rewards_to_go, _ = buffer.sample(batch_size=batch_size)
+            states_tensor = torch.as_tensor(states, dtype=torch.float32)
+            actions_tensor = torch.as_tensor(actions, dtype=torch.float32)
+            rewards_to_go_tensor = torch.as_tensor(rewards_to_go, dtype=torch.float32)
+            rewards_tensor = torch.as_tensor(rewards, dtype=torch.float32)
             
             optimizer.zero_grad()
 
             # TODO: compute loss here
-            loss = 0.0
+            if use_rwds:
+                loss = reinforce_rwd_signal(policy=policy, states=states_tensor, actions=actions_tensor,rewards=rewards_tensor)
+            else:
+                loss = reinforce_signal(policy=policy, states=states_tensor, actions=actions_tensor, 
+                                        rewards_to_go=rewards_to_go_tensor, avg_rwd=avg_step_reward, use_avg=use_avg)
 
             loss.backward()
             optimizer.step()
 
         # TODO: record the epoch's avg episodic return for the learning curve.
-
+        returns_per_epoch.append(avg_episode_reward)
+        print(f"Epoch {x+1}: return = {avg_episode_reward:.4f}")
     # TODO: return (policy, list_of_per_epoch_returns).
-
+    return policy, returns_per_epoch
 """
 HW4 — Task 3: Critic network and Generalized Advantage Estimation (GAE).
 
@@ -255,13 +273,21 @@ def compute_gae(rewards, values, next_values, dones, gamma=0.975, lam=0.95):
         delta_t = r_t + gamma * V(s_{t+1}) * (1 - done_t) - V(s_t)
         A_t     = delta_t + gamma * lam * (1 - done_t) * A_{t+1}
     """
-    pass
-
+    advantages = np.zeros_like(rewards)
+    gae = 0
+    for t in reversed(range(len(rewards))):
+        boundary = 1.0 - dones[t]
+        delta = rewards[t] + gamma * next_values[t] * boundary - values[t]
+        gae = delta + gamma * lam * boundary * gae
+        advantages[t] = gae
+    return advantages
 
 def reinforce_adv_signal(policy, states, actions, advantages):
     """Policy-gradient loss weighted by arbitrary advantages (e.g. GAE)."""
     # TODO: compute  -E[ A_t * log pi(a | s) ].
-    pass
+    log_probs = _log_prob(policy=policy, states=states, actions=actions)
+    loss = -(advantages * log_probs).mean()
+    return loss
 
 
 def train_advantage_vpg(
@@ -298,12 +324,13 @@ def train_advantage_vpg(
 
         # --- collect experience ---
         with torch.no_grad():
-            buffer, avg_rwd = collect_data(
+            buffer, avg_step_rwd, avg_episode_reward = collect_data(
                 episodes * episode_len, env, policy, title=f"gae {x + 1}/{epochs}"
             )
-
+        
         # TODO: fill buffer.ret_to_go using buffer.calc_reward_to_go(gamma).
-
+        buffer.calc_reward_to_go(gamma)
+        
         # --- train the critic ---
         # Regress V(s) toward the reward-to-go targets for critic_updates steps.
         for _ in range(critic_updates):
@@ -313,17 +340,27 @@ def train_advantage_vpg(
             cr_optimizer.zero_grad()
             # TODO: compute mse_loss between critic(states_t) and rtg_t,
             #       then call .backward() and cr_optimizer.step().
-
+            values_preds = critic(states_t)
+            loss = mse_loss(values_preds, rtg_t)
+            loss.backward()
+            cr_optimizer.step()
         # --- compute GAE advantages ---
         # Run the critic (no gradients) on every stored state.
         all_states = torch.as_tensor(buffer.states[: buffer.max_i], dtype=torch.float32)
         with torch.no_grad():
-            values = critic(all_states).numpy()          # V(s_t)
+            values = critic(all_states).detach().numpy()          # V(s_t)
         next_values = np.zeros_like(values)
         next_values[:-1] = values[1:]                    # V(s_{t+1}), 0 at episode end
 
         # TODO: call compute_gae(...) to get an (N, 1) array of advantages.
-        advantages = None  # TODO
+        advantages = compute_gae(
+            rewards=buffer.rewards[:buffer.max_i],
+            values=values,
+            next_values=next_values,
+            dones=buffer.dones[:buffer.max_i],
+            gamma=gamma,
+            lam=lam
+        )  # TODO
 
         # Normalise for training stability (provided).
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
@@ -337,8 +374,11 @@ def train_advantage_vpg(
             optimizer.zero_grad()
             # TODO: call reinforce_adv_signal(...) to get the loss,
             #       then call .backward() and optimizer.step().
-
-        ep_return = avg_rwd * episode_len
+            loss = reinforce_adv_signal(policy=policy, states=states_t, actions=actions_t, advantages=adv_t)
+            loss.backward()
+            optimizer.step()
+        # ep_return = avg_step_rwd * episode_len
+        ep_return = avg_episode_reward
         returns_per_epoch.append(ep_return)
         print(f"gae epoch {x + 1}/{epochs}: return={ep_return:.2f}")
 
@@ -463,18 +503,30 @@ def train_ppo(
     # TODO: return policy, list_of_returns, list_of_losses
 
 if __name__ == "__main__":
+    # Task 1 Random Policy
     env = gym.make("Pendulum-v1")
     policy = build_actor(state_dim=3, action_dim=1, hidden_size=256)
     buffer, avg_step_reward, avg_episode_reward = collect_data(1000, env, policy)
     print(f"AVG STEP REWARD: {avg_step_reward}")
     print(f"AVG EPISODE REWARD: {avg_episode_reward}")
-    # # Example: compare rewards-to-go vs GAE
-    # policy_rtg, ret_rtg = train_vpg(epochs=200, learning_rate=3e-4)
-    # policy_gae, ret_gae = train_advantage_vpg(epochs=200, learning_rate=3e-4)
+    
+    # # Task 2 Training and Plotting
+    # policy1, ret1 = train_vpg(epochs=300, learning_rate=1e-3)
+    # policy2, ret2 = train_vpg(epochs=300, learning_rate=2e-4)
+
+    # plot_learning_curves(
+    # {"lr=1e-3": ret1,"lr=3e-4": ret2,},
+    # title="Task 2: rewards-to-go for two learning rates",
+    # )
+    
+    # # Task 3 Training and Plotting
+    # policy_rtg, ret_rtg = train_vpg(epochs=500, learning_rate=3e-4)
+    # policy_gae, ret_gae = train_advantage_vpg(epochs=500, learning_rate=3e-4)
     # plot_learning_curves(
     #     {"rewards-to-go": ret_rtg, "GAE": ret_gae},
     #     title="Task 3: rewards-to-go vs GAE",
     # )
+    
     # record_video(policy_gae, path="videos/task3_gae.mp4")  # optional
 
     # # Example: compare two learning rates
