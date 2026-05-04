@@ -46,13 +46,21 @@ def compute_gae(rewards, values, next_values, dones, gamma=0.975, lam=0.95):
         delta_t = r_t + gamma * V(s_{t+1}) * (1 - done_t) - V(s_t)
         A_t     = delta_t + gamma * lam * (1 - done_t) * A_{t+1}
     """
-    pass
+    advantages = np.zeros_like(rewards, dtype=np.float32)
+    last_adv = 0.0
+    dones = dones.astype(np.float32)
+    for t in reversed(range(len(rewards))):
+        mask = 1.0 - dones[t, 0]
+        delta = rewards[t, 0] + gamma * next_values[t, 0] * mask - values[t, 0]
+        last_adv = delta + gamma * lam * mask * last_adv
+        advantages[t, 0] = last_adv
+    return advantages
 
 
 def reinforce_adv_signal(policy, states, actions, advantages):
     """Policy-gradient loss weighted by arbitrary advantages (e.g. GAE)."""
-    # TODO: compute  -E[ A_t * log pi(a | s) ].
-    pass
+    log_probs = _log_prob(policy, states, actions)
+    return -(advantages * log_probs).mean()
 
 
 def train_advantage_vpg(

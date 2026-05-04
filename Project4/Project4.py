@@ -11,6 +11,7 @@ from Modules import NormalModule
 from plotting import plot_learning_curves, plot_loss_curves
 from video import record_video, generate_strobe
 from gae import build_critic, compute_gae
+from ppo import train_ppo
 
 """
 HW4 — Task 1: Replay buffer and environment interaction.

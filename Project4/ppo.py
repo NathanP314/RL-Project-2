@@ -47,7 +47,16 @@ def ppo_surrogate_loss(
     Returns the *negative* of the objective so that optimizer.step()
     performs gradient ascent on the expected return.
     """
-    pass
+    log_probs = _log_prob(policy, states, actions)
+    ratios = th.exp(log_probs - old_log_probs)
+    if clip:
+        clipped_ratios = th.clamp(ratios, 1.0 - eps_clip, 1.0 + eps_clip)
+        unclipped = ratios * advantages
+        clipped = clipped_ratios * advantages
+        loss = -th.min(unclipped, clipped).mean()
+    else:
+        loss = -(ratios * advantages).mean()
+    return loss
 
 
 def ppo_total_loss(
@@ -70,7 +79,20 @@ def ppo_total_loss(
     where L_VF = ( V_theta(s) - R_t )^2  and  S[pi] is the policy entropy.
     Returns a scalar tensor to be minimised.
     """
-    pass
+    surr_loss = ppo_surrogate_loss(
+        policy,
+        states,
+        actions,
+        advantages,
+        old_log_probs,
+        eps_clip=eps_clip,
+        clip=clip,
+    )
+    values = critic(states)
+    value_loss = mse_loss(values, returns)
+    mu, sigma = policy(states)
+    entropy = Normal(mu, sigma).entropy().sum(dim=-1).mean()
+    return surr_loss + c1 * value_loss - c2 * entropy
 
 
 # ---------------------------------------------------------------------------
@@ -112,19 +134,93 @@ def train_ppo(
     losses_per_iter  = []
 
     for k in range(iterations):
-        # TODO: 1) roll out the current policy for `steps_per_iter` steps
-        #          and store transitions in a Buffer.
-        #       2) compute V(s) and V(s') with the critic, then GAE advantages
-        #          and target returns (returns = advantages + V(s)).
-        #       3) cache the log-probabilities of the sampled actions under
-        #          the *old* policy (detach from the graph).
-        #       4) for `sgd_epochs` epochs, iterate over minibatches of the
-        #          collected data and minimise ppo_total_loss(...).
-        #       5) log per-iteration episodic return and total loss for the
-        #          required learning / loss curve plots.
-        pass
+        buffer = Buffer(sdim=state_dim, adim=action_dim, size=steps_per_iter)
+        s, _ = env.reset()
+        episode_rewards = []
+        episode_reward = 0.0
 
-    # TODO: return policy, list_of_returns, list_of_losses
+        with th.no_grad():
+            for _ in range(steps_per_iter):
+                a = act(policy, s)
+                a_scaled = rescale_actions(a, env.action_space.low[0], env.action_space.high[0])
+                s2, r, terminated, truncated, _ = env.step(a_scaled)
+                done = terminated or truncated
+                buffer.add(state=s, action=a, reward=r, done=done)
+                episode_reward += r
+                if done:
+                    episode_rewards.append(episode_reward)
+                    episode_reward = 0.0
+                    s, _ = env.reset()
+                else:
+                    s = s2
+
+        if episode_reward != 0.0:
+            episode_rewards.append(episode_reward)
+
+        buffer.calc_reward_to_go(gamma)
+
+        all_states = th.as_tensor(buffer.states[: buffer.max_i], dtype=th.float32)
+        all_actions = th.as_tensor(buffer.actions[: buffer.max_i], dtype=th.float32)
+        with th.no_grad():
+            values = critic(all_states).numpy()
+        next_values = np.zeros_like(values)
+        next_values[:-1] = values[1:]
+        next_values[buffer.dones[: buffer.max_i, 0]] = 0.0
+
+        advantages = compute_gae(
+            rewards=buffer.rewards[: buffer.max_i],
+            values=values,
+            next_values=next_values,
+            dones=buffer.dones[: buffer.max_i],
+            gamma=gamma,
+            lam=lam,
+        )
+        returns = advantages + values
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+        all_returns = th.as_tensor(returns, dtype=th.float32)
+        all_advantages = th.as_tensor(advantages, dtype=th.float32)
+        old_log_probs = _log_prob(policy, all_states, all_actions).detach()
+
+        iter_loss = 0.0
+        batch_count = 0
+        for _ in range(sgd_epochs):
+            idxs = np.random.randint(0, buffer.max_i, size=minibatch_size)
+            batch_states = all_states[idxs]
+            batch_actions = all_actions[idxs]
+            batch_advantages = all_advantages[idxs]
+            batch_returns = all_returns[idxs]
+            batch_old_log_probs = old_log_probs[idxs]
+
+            optimizer.zero_grad()
+            cr_optimizer.zero_grad()
+            loss = ppo_total_loss(
+                policy,
+                critic,
+                batch_states,
+                batch_actions,
+                batch_advantages,
+                batch_returns,
+                batch_old_log_probs,
+                eps_clip=eps_clip,
+                c1=c1,
+                c2=c2,
+                clip=clip,
+            )
+            loss.backward()
+            optimizer.step()
+            cr_optimizer.step()
+
+            iter_loss += loss.item()
+            batch_count += 1
+
+        avg_loss = iter_loss / max(batch_count, 1)
+        avg_return = float(np.mean(episode_rewards)) if len(episode_rewards) > 0 else 0.0
+        returns_per_iter.append(avg_return)
+        losses_per_iter.append(avg_loss)
+        print(f"ppo iter {k + 1}/{iterations}: return={avg_return:.2f} loss={avg_loss:.4f}")
+
+    return policy, returns_per_iter, losses_per_iter
 
 
 if __name__ == "__main__":
