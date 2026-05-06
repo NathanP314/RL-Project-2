@@ -90,13 +90,13 @@ class RecurrentActor(nn.Module):
         self.lstm = nn.LSTM(input_dim, hidden_dim, batch_first=True)
         self.fc = nn.Linear(hidden_dim, hidden_dim)
         self.mu_head = nn.Linear(hidden_dim, action_dim)
-        self.log_std_head = nn.Linear(hidden_dim, action_dim)  # replaces nn.Parameter
+        self.log_std_head = nn.Linear(hidden_dim, action_dim) # state-dependent standard deviation
 
     def forward(self, x, hidden=None):
         out, hidden = self.lstm(x, hidden)
         out = torch.relu(self.fc(out))
         mu = self.mu_head(out)
-        log_std = self.log_std_head(out).clamp(-3, -0.5)
+        log_std = self.log_std_head(out).clamp(-3, -0.5) # clamping to ensure loss range isn't crazy; was getting wild results before
         std = log_std.exp()
         return mu, std, hidden
 
@@ -200,7 +200,7 @@ class Buffer:
         )
 
 # ---------------------------------------------------------------------------
-# Helper functions
+# Helper functions, mostly same as before
 # ---------------------------------------------------------------------------
 
 def rescale_actions(action: np.ndarray, amin: float, amax: float) -> np.ndarray:
@@ -212,10 +212,10 @@ def act(policy: RecurrentActor, state_seq: np.ndarray, hidden):
     state_seq : (T, state_dim) — recent context window
     Returns action (action_dim,) and updated hidden state.
     """
-    x = torch.tensor(state_seq, dtype=torch.float32).unsqueeze(0) # (1, T, D)
+    x = torch.tensor(state_seq, dtype=torch.float32).unsqueeze(0) # shape (1, T, D)
     with torch.no_grad():
         mu, std, hidden = policy(x, hidden)
-    mu  = mu[:, -1, :] # last timestep only (1, A)
+    mu  = mu[:, -1, :] # last timestep only, shape (1, A)
     std = std[:, -1, :]
     dist = Normal(mu, std)
     action = dist.sample()
@@ -238,13 +238,13 @@ def collect_data(num_steps: int, env, agent: RecurrentActor, seq_len: int = 4):
     buffer = Buffer(sdim=sdim, adim=adim, size=num_steps)
     hidden = agent.init_hidden(batch_size=1)
 
-    state_seq = deque([s] * seq_len, maxlen=seq_len)
+    state_seq = deque([s] * seq_len, maxlen=seq_len) # keep track of state sequence
 
     episode_rewards: list[float] = []
     ep_reward = 0.0
 
     for _ in range(num_steps):
-        seq_array = np.array(state_seq) # (T, D)
+        seq_array = np.array(state_seq) # shape (T, D)
         a, hidden = act(policy=agent, state_seq=seq_array, hidden=hidden)
         a_scaled = rescale_actions(a, env.action_space.low[0], env.action_space.high[0])
         s2, r, term, trunc, _ = env.step(a_scaled)
@@ -327,7 +327,7 @@ def ppo_total_loss(policy, critic, states, actions, advantages, returns, old_log
             torch.clamp(ratios, 1 - eps_clip, 1 + eps_clip) * adv
         ).mean()
 
-    values, _ = critic(states, hidden=None)          # (B, T, 1)
+    values, _ = critic(states, hidden=None) # shape (B, T, 1)
     val_loss = mse_loss(values[:, -1, :].squeeze(-1), returns.squeeze(-1))
 
     entropy = dist.entropy().sum(-1).mean()
@@ -391,10 +391,10 @@ def train_vpg(
         epoch_loss = 0.0
         for _ in range(updates):
             states, actions, rewards, rtg, _ = buffer.sample_sequence(batch_size, seq_len)
-            s_t   = torch.as_tensor(states,             dtype=torch.float32)  # (B, T, 1)
-            a_t   = torch.as_tensor(actions[:, -1, :],  dtype=torch.float32)  # (B, A) last step
-            rtg_t = torch.as_tensor(rtg[:, -1, :],      dtype=torch.float32)  # (B, 1) last step
-            r_t   = torch.as_tensor(rewards[:, -1, :],  dtype=torch.float32)
+            s_t   = torch.as_tensor(states, dtype=torch.float32) # shape (B, T, 1)
+            a_t   = torch.as_tensor(actions[:, -1, :], dtype=torch.float32) # shape (B, A) last step
+            rtg_t = torch.as_tensor(rtg[:, -1, :], dtype=torch.float32) # shape (B, 1) last step
+            r_t   = torch.as_tensor(rewards[:, -1, :], dtype=torch.float32)
  
             optimizer.zero_grad()
             if use_rwds:
@@ -448,14 +448,19 @@ def train_advantage_vpg(
             )
         buffer.calc_reward_to_go(gamma)
  
-        # --- train critic: regress V(s) toward reward-to-go ---
+        # normalize RTG targets for stable critic regression
+        all_rtg = buffer.ret_to_go[: buffer.max_i]
+        rtg_mean = all_rtg.mean()
+        rtg_std  = all_rtg.std() + 1e-8
+
+        # --- train critic ---
         critic_loss_sum = 0.0
         for _ in range(critic_updates):
             states, _, _, rtg, _ = buffer.sample_sequence(batch_size, seq_len)
-            s_t   = torch.as_tensor(states, dtype=torch.float32)  # (B, T, 1)
-            rtg_t = torch.as_tensor(rtg[:, -1:, :], dtype=torch.float32)  # (B, 1, 1)
+            s_t = torch.as_tensor(states, dtype=torch.float32)
+            rtg_t = torch.as_tensor((rtg[:, -1:, :] - rtg_mean) / rtg_std, dtype=torch.float32)
             cr_optimizer.zero_grad()
-            values, _ = critic(s_t) # (B, T, 1)
+            values, _ = critic(s_t) # shape (B, T, 1)
             loss = mse_loss(values[:, -1:, :], rtg_t)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(critic.parameters(), max_norm=0.5)
@@ -468,6 +473,7 @@ def train_advantage_vpg(
         with torch.no_grad():
             values, _ = critic(all_s)
         values = values.squeeze().numpy().reshape(-1, 1)
+        values = values * rtg_std + rtg_mean  # back to reward scale for GAE
  
         next_values = np.zeros_like(values)
         next_values[:-1] = values[1:]
@@ -639,8 +645,8 @@ if __name__ == "__main__":
     print(f"Random policy | avg step reward: {step_r:.3f} | avg ep reward: {ep_r:.2f}")
  
     # --- Task 2: VPG with two learning rates ---
-    p1, ret1, loss1 = train_vpg(epochs=200, learning_rate=1e-3)
-    p2, ret2, loss2 = train_vpg(epochs=200, learning_rate=2e-4)
+    p1, ret1, loss1 = train_vpg(epochs=50, learning_rate=1e-3)
+    p2, ret2, loss2 = train_vpg(epochs=50, learning_rate=2e-4)
     plot_learning_curves(
         {"lr=1e-3": ret1, "lr=2e-4": ret2},
         title="Task 2: VPG learning rates", smooth=0.9,
@@ -651,8 +657,8 @@ if __name__ == "__main__":
     )
  
     # --- Task 3: reward-to-go vs GAE ---
-    _, ret_rtg, loss_rtg = train_vpg(epochs=200, learning_rate=3e-4)
-    _, ret_gae, actor_losses_gae, critic_losses_gae = train_advantage_vpg(epochs=200, learning_rate=3e-4)
+    _, ret_rtg, loss_rtg = train_vpg(epochs=50, learning_rate=3e-4)
+    _, ret_gae, actor_losses_gae, critic_losses_gae = train_advantage_vpg(epochs=50, learning_rate=3e-4)
     plot_learning_curves(
         {"rewards-to-go": ret_rtg, "GAE": ret_gae},
         title="Task 3: RTG vs GAE", smooth=0.9,
@@ -667,8 +673,8 @@ if __name__ == "__main__":
     )
  
     # --- Task 4 & 5: PPO clipped vs unclipped ---
-    _, ret_clip,   loss_clip   = train_ppo(iterations=200, clip=True)
-    _, ret_noclip, loss_noclip = train_ppo(iterations=200, clip=False)
+    _, ret_clip,   loss_clip   = train_ppo(iterations=50, clip=True)
+    _, ret_noclip, loss_noclip = train_ppo(iterations=50, clip=False)
     plot_learning_curves(
         {"clipped": ret_clip, "unclipped": ret_noclip},
         title="Task 4: PPO clipped vs unclipped", smooth=0.9,
@@ -678,7 +684,7 @@ if __name__ == "__main__":
         title="Task 4: PPO loss curves", smooth=0.9,
     )
  
-    _, ret_ppo, loss_ppo = train_ppo(iterations=200, clip=True)
+    _, ret_ppo, loss_ppo = train_ppo(iterations=50, clip=True)
     plot_learning_curves({"PPO": ret_ppo}, title="Task 5: Full PPO", smooth=0.9)
     plot_loss_curves({"PPO": loss_ppo},    title="Task 5: PPO loss", smooth=0.9)
     
