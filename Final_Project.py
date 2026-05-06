@@ -91,12 +91,15 @@ class RecurrentActor(nn.Module):
         self.fc = nn.Linear(hidden_dim, hidden_dim)
         self.mu_head = nn.Linear(hidden_dim, action_dim)
         self.log_std_head = nn.Linear(hidden_dim, action_dim) # state-dependent standard deviation
+        nn.init.zeros_(self.log_std_head.weight)
+        nn.init.constant_(self.log_std_head.bias, -1.0)
 
     def forward(self, x, hidden=None):
         out, hidden = self.lstm(x, hidden)
         out = torch.relu(self.fc(out))
+        out = torch.clamp(out, -10, 10)
         mu = self.mu_head(out)
-        log_std = self.log_std_head(out).clamp(-3, -0.5) # clamping to ensure loss range isn't crazy; was getting wild results before
+        log_std = self.log_std_head(out).clamp(-3, 0) # clamping to ensure loss range isn't crazy; was getting wild results before
         std = log_std.exp()
         return mu, std, hidden
 
@@ -234,12 +237,9 @@ def collect_data(num_steps: int, env, agent: RecurrentActor, seq_len: int = 4):
     s = state_extract(s)
     sdim = len(s)
     adim = env.action_space.shape[0]
-
     buffer = Buffer(sdim=sdim, adim=adim, size=num_steps)
     hidden = agent.init_hidden(batch_size=1)
-
     state_seq = deque([s] * seq_len, maxlen=seq_len) # keep track of state sequence
-
     episode_rewards: list[float] = []
     ep_reward = 0.0
 
@@ -255,7 +255,6 @@ def collect_data(num_steps: int, env, agent: RecurrentActor, seq_len: int = 4):
         ep_reward += r
         state_seq.append(s2)
         s = s2
-
         if done:
             episode_rewards.append(ep_reward)
             ep_reward = 0.0
@@ -263,10 +262,8 @@ def collect_data(num_steps: int, env, agent: RecurrentActor, seq_len: int = 4):
             s    = state_extract(s)
             hidden = agent.init_hidden(batch_size=1)
             state_seq = deque([s] * seq_len, maxlen=seq_len)
-
     if ep_reward != 0.0:
         episode_rewards.append(ep_reward)
-
     avg_step_reward = float(np.mean(buffer.rewards[: buffer.max_i]))
     avg_ep_reward   = float(np.mean(episode_rewards)) if episode_rewards else 0.0
     return buffer, avg_step_reward, avg_ep_reward
@@ -473,7 +470,7 @@ def train_advantage_vpg(
         with torch.no_grad():
             values, _ = critic(all_s)
         values = values.squeeze().numpy().reshape(-1, 1)
-        values = values * rtg_std + rtg_mean  # back to reward scale for GAE
+        values = values * rtg_std + rtg_mean  # convert back to reward scale for GAE
  
         next_values = np.zeros_like(values)
         next_values[:-1] = values[1:]
@@ -493,7 +490,7 @@ def train_advantage_vpg(
         for _ in range(updates):
             states, actions, _, _, _ = buffer.sample_sequence(batch_size, seq_len)
             idxs  = np.random.randint(0, buffer.max_i - seq_len, size=batch_size)
-            adv_s = np.array([advantages[i + seq_len - 1] for i in idxs])  # (B, 1)
+            adv_s = np.array([advantages[i + seq_len - 1] for i in idxs]) # shape (B, 1)
  
             s_t   = torch.as_tensor(states, dtype=torch.float32)
             a_t   = torch.as_tensor(actions[:, -1, :], dtype=torch.float32)
@@ -519,7 +516,7 @@ def train_advantage_vpg(
 def train_ppo(
     iterations=200,
     steps_per_iter=2048,
-    sgd_epochs=10,
+    sgd_epochs=20,
     minibatch_size=64,
     learning_rate=3e-4,
     hidden_size=64,
@@ -527,7 +524,7 @@ def train_ppo(
     lam=0.95,
     eps_clip=0.2,
     c1=0.5,
-    c2=0.01,
+    c2=0.003,
     clip=True,
 ):
     """Full recurrent PPO with clipped surrogate + entropy bonus."""
@@ -548,19 +545,25 @@ def train_ppo(
         # --- collect rollout ---
         buffer, _, _ = collect_data(steps_per_iter, env, policy, seq_len=1)
         buffer.calc_reward_to_go(gamma)
- 
+
         N       = buffer.max_i
-        states  = torch.tensor(buffer.states[:N],    dtype=torch.float32)   # (N, D)
-        actions = torch.tensor(buffer.actions[:N],   dtype=torch.float32)   # (N, A)
+        states  = torch.tensor(buffer.states[:N],    dtype=torch.float32)
+        actions = torch.tensor(buffer.actions[:N],   dtype=torch.float32)
         dones   = buffer.dones[:N]
-        returns = torch.tensor(buffer.ret_to_go[:N], dtype=torch.float32)   # (N, 1)
- 
+        returns = torch.tensor(buffer.ret_to_go[:N], dtype=torch.float32)
+
+        # normalize returns for stable value regression
+        ret_mean = returns.mean()
+        ret_std  = returns.std() + 1e-8
+        returns_norm = (returns - ret_mean) / ret_std
+        
         # --- GAE ---
         with torch.no_grad():
-            values, _ = critic(states.unsqueeze(1))   # (N, 1, 1)
+            values, _ = critic(states.unsqueeze(1))
         values = values.squeeze().numpy().reshape(-1, 1)
+        values = values * ret_std.numpy() + ret_mean.numpy()  # convert back to reward scale
  
-        next_values      = np.zeros_like(values)
+        next_values = np.zeros_like(values)
         next_values[:-1] = values[1:]
         next_values[dones[:, 0]] = 0.0
  
@@ -575,45 +578,57 @@ def train_ppo(
         with torch.no_grad():
             mu, std, _ = old_policy(states.unsqueeze(1))
             old_lp     = Normal(mu[:, -1, :], std[:, -1, :]).log_prob(actions).sum(-1)
+            mean_std   = std[:, -1, :].mean().item()
  
         # --- PPO update ---
         total_loss = 0.0
         for _ in range(sgd_epochs):
             idxs = np.random.randint(0, N, size=minibatch_size)
- 
-            b_s   = states[idxs].unsqueeze(1)    # (B, 1, D)
-            b_a   = actions[idxs]                 # (B, A)
-            b_adv = advantages[idxs]              # (B, 1)
-            b_ret = returns[idxs]                 # (B, 1)
-            b_olp = old_lp[idxs]                  # (B,)
+            b_s = states[idxs].unsqueeze(1) # shape (B, 1, D)
+            b_a = actions[idxs] # shape (B, A)
+            b_adv = advantages[idxs] # shape (B, 1)
+            b_ret = returns_norm[idxs]
+            b_olp = old_lp[idxs] # shape (B,)
  
             mu, std, _ = policy(b_s)
-            dist       = Normal(mu[:, -1, :], std[:, -1, :])
-            log_probs  = dist.log_prob(b_a).sum(-1)
-            ratios     = torch.exp(log_probs - b_olp)
-            adv        = b_adv.squeeze(-1)
- 
-            surr1      = ratios * adv
-            surr2      = torch.clamp(ratios, 1 - eps_clip, 1 + eps_clip) * adv
+            dist = Normal(mu[:, -1, :], std[:, -1, :])
+            log_probs = dist.log_prob(b_a).sum(-1)
+            ratios = torch.exp(log_probs - b_olp)
+            adv = b_adv.squeeze(-1)
+            surr1 = ratios * adv
+            surr2 = torch.clamp(ratios, 1 - eps_clip, 1 + eps_clip) * adv
             actor_loss = -torch.min(surr1, surr2).mean() if clip else -(ratios * adv).mean()
- 
             val_pred, _ = critic(b_s)
-            val_loss    = mse_loss(val_pred[:, -1, :].squeeze(-1), b_ret.squeeze(-1))
- 
-            entropy     = dist.entropy().sum(-1).mean()
-            loss        = actor_loss + c1 * val_loss - c2 * entropy
- 
+            val_pred_clamped = val_pred[:, -1, :].squeeze(-1).clamp(-20, 20) # normalized space
+            val_loss = mse_loss(val_pred_clamped, b_ret.squeeze(-1))
+            entropy = dist.entropy().sum(-1).mean()
+            loss    = actor_loss + c1 * val_loss - c2 * entropy
+            # guard against inf loss before backward
+            if not torch.isfinite(loss):
+                print(f"Non-finite loss at iter {k+1}, skipping")
+                optimizer.zero_grad()
+                cr_optimizer.zero_grad()
+                continue
             optimizer.zero_grad()
             cr_optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=0.5)
-            torch.nn.utils.clip_grad_norm_(critic.parameters(), max_norm=0.5)
-            optimizer.step()
-            cr_optimizer.step()
+            # skip update if gradients contain NaN
+            params = list(policy.parameters()) + list(critic.parameters())
+            grads_ok = all(
+                p.grad is None or torch.isfinite(p.grad).all()
+                for p in params
+            ) and any(p.grad is not None for p in params)
+            if grads_ok:
+                torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=0.5)
+                torch.nn.utils.clip_grad_norm_(critic.parameters(), max_norm=0.5)
+                optimizer.step()
+                cr_optimizer.step()
+            else:
+                print(f"NaN gradient detected at iter {k+1}, skipping update")
+                optimizer.zero_grad()
+                cr_optimizer.zero_grad()
             total_loss += loss.item()
- 
         avg_loss = total_loss / sgd_epochs
- 
         # track episode returns from this iteration's buffer
         ep_returns = []
         ep_r       = 0.0
@@ -625,28 +640,22 @@ def train_ppo(
         if ep_r != 0.0:
             ep_returns.append(ep_r)
         avg_return = float(np.mean(ep_returns)) if ep_returns else 0.0
- 
+        
         returns_per_iter.append(avg_return)
         losses_per_iter.append(avg_loss)
-        print(f"PPO iter {k+1}/{iterations}: return={avg_return:.2f}  loss={avg_loss:.4f}")
- 
+        print(f"PPO iter {k+1}/{iterations}: return={avg_return:.2f}  loss={avg_loss:.4f}  mean_std={mean_std:.4f}") 
     return policy, returns_per_iter, losses_per_iter
  
- 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
- 
 if __name__ == "__main__":
-    # --- Task 1: sanity-check random policy ---
+    # --- Task 1: random policy ---
     env    = gym.make("Pendulum-v1")
     policy = RecurrentActor(input_dim=1, hidden_dim=64, action_dim=1)
     buf, step_r, ep_r = collect_data(1000, env, policy)
     print(f"Random policy | avg step reward: {step_r:.3f} | avg ep reward: {ep_r:.2f}")
  
     # --- Task 2: VPG with two learning rates ---
-    p1, ret1, loss1 = train_vpg(epochs=50, learning_rate=1e-3)
-    p2, ret2, loss2 = train_vpg(epochs=50, learning_rate=2e-4)
+    p1, ret1, loss1 = train_vpg(epochs=300, learning_rate=1e-3)
+    p2, ret2, loss2 = train_vpg(epochs=300, learning_rate=2e-4)
     plot_learning_curves(
         {"lr=1e-3": ret1, "lr=2e-4": ret2},
         title="Task 2: VPG learning rates", smooth=0.9,
@@ -657,7 +666,7 @@ if __name__ == "__main__":
     )
  
     # --- Task 3: reward-to-go vs GAE ---
-    _, ret_rtg, loss_rtg = train_vpg(epochs=50, learning_rate=3e-4)
+    _, ret_rtg, loss_rtg = train_vpg(epochs=300, learning_rate=3e-4)
     _, ret_gae, actor_losses_gae, critic_losses_gae = train_advantage_vpg(epochs=50, learning_rate=3e-4)
     plot_learning_curves(
         {"rewards-to-go": ret_rtg, "GAE": ret_gae},
@@ -673,8 +682,8 @@ if __name__ == "__main__":
     )
  
     # --- Task 4 & 5: PPO clipped vs unclipped ---
-    _, ret_clip,   loss_clip   = train_ppo(iterations=50, clip=True)
-    _, ret_noclip, loss_noclip = train_ppo(iterations=50, clip=False)
+    _, ret_clip,   loss_clip   = train_ppo(iterations=300, clip=True)
+    _, ret_noclip, loss_noclip = train_ppo(iterations=300, clip=False)
     plot_learning_curves(
         {"clipped": ret_clip, "unclipped": ret_noclip},
         title="Task 4: PPO clipped vs unclipped", smooth=0.9,
@@ -684,7 +693,7 @@ if __name__ == "__main__":
         title="Task 4: PPO loss curves", smooth=0.9,
     )
  
-    _, ret_ppo, loss_ppo = train_ppo(iterations=50, clip=True)
+    _, ret_ppo, loss_ppo = train_ppo(iterations=300, clip=True)
     plot_learning_curves({"PPO": ret_ppo}, title="Task 5: Full PPO", smooth=0.9)
     plot_loss_curves({"PPO": loss_ppo},    title="Task 5: PPO loss", smooth=0.9)
     
