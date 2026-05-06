@@ -667,7 +667,7 @@ if __name__ == "__main__":
  
     # --- Task 3: reward-to-go vs GAE ---
     _, ret_rtg, loss_rtg = train_vpg(epochs=300, learning_rate=3e-4)
-    _, ret_gae, actor_losses_gae, critic_losses_gae = train_advantage_vpg(epochs=50, learning_rate=3e-4)
+    _, ret_gae, actor_losses_gae, critic_losses_gae = train_advantage_vpg(epochs=300, learning_rate=3e-4)
     plot_learning_curves(
         {"rewards-to-go": ret_rtg, "GAE": ret_gae},
         title="Task 3: RTG vs GAE", smooth=0.9,
