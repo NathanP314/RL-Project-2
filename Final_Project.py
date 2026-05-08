@@ -128,6 +128,31 @@ class RecurrentCritic(nn.Module):
         c = torch.zeros(1, batch_size, self.hidden_dim)
         return (h, c)
 
+class EnsembleCritic(nn.Module):
+    def __init__(self, input_dim: int, hidden_dim: int, num_critics: int = 3):
+        super().__init__()
+        self.critics = nn.ModuleList([
+            RecurrentCritic(input_dim, hidden_dim) for _ in range(num_critics)
+        ])
+
+    def forward(self, x, hidden=None):
+        """
+        x      : (B, T, input_dim)
+        returns: values (B, T, 1), hidden (list of tuples)
+        """
+        values = []
+        hiddens = []
+        for critic in self.critics:
+            val, hid = critic(x, hidden)
+            values.append(val)
+            hiddens.append(hid)
+        # Average the values
+        ensemble_values = torch.stack(values, dim=0).mean(dim=0)
+        return ensemble_values, hiddens
+
+    def init_hidden(self, batch_size: int = 1):
+        return [critic.init_hidden(batch_size) for critic in self.critics]
+
 # ---------------------------------------------------------------------------
 # Replay buffer
 # ---------------------------------------------------------------------------
@@ -267,6 +292,66 @@ def collect_data(num_steps: int, env, agent: RecurrentActor, seq_len: int = 4):
     avg_step_reward = float(np.mean(buffer.rewards[: buffer.max_i]))
     avg_ep_reward   = float(np.mean(episode_rewards)) if episode_rewards else 0.0
     return buffer, avg_step_reward, avg_ep_reward
+
+def collect_data_parallel(num_steps: int, num_envs: int, agent: RecurrentActor, seq_len: int = 4):
+    """
+    Collect data in parallel across multiple pendulum environments.
+
+    Returns:
+        buffer           — populated Buffer
+        avg_step_reward  — mean per-step reward
+        avg_ep_reward    — mean per-episode return
+    """
+    import time
+    start_time = time.time()
+    env_fns = [lambda: gym.make("Pendulum-v1") for _ in range(num_envs)]
+    envs = gym.vector.SyncVectorEnv(env_fns)
+    s, _ = envs.reset()
+    s = np.array([state_extract(si) for si in s])  # shape (num_envs, 1)
+    sdim = s.shape[1]
+    adim = envs.single_action_space.shape[0]
+    buffer = Buffer(sdim=sdim, adim=adim, size=num_steps * num_envs)
+    hiddens = [agent.init_hidden(batch_size=1) for _ in range(num_envs)]
+    state_seqs = [deque([s[i]] * seq_len, maxlen=seq_len) for i in range(num_envs)]
+    episode_rewards = [[] for _ in range(num_envs)]
+    ep_rewards = [0.0] * num_envs
+
+    steps_per_env = num_steps // num_envs
+    for step in range(steps_per_env):
+        seq_arrays = [np.array(state_seqs[i]) for i in range(num_envs)]  # list of (T, D)
+        actions = []
+        for i in range(num_envs):
+            a, hiddens[i] = act(policy=agent, state_seq=seq_arrays[i], hidden=hiddens[i])
+            actions.append(a)
+        actions = np.array(actions)  # shape (num_envs, A)
+        a_scaled = rescale_actions(actions, envs.single_action_space.low[0], envs.single_action_space.high[0])
+        s2, r, term, trunc, _ = envs.step(a_scaled)
+        s2 = np.array([state_extract(si) for si in s2])
+        dones = term | trunc
+
+        for i in range(num_envs):
+            buffer.add(state=s[i], action=a_scaled[i], reward=r[i], done=dones[i])
+            ep_rewards[i] += r[i]
+            state_seqs[i].append(s2[i])
+            if dones[i]:
+                episode_rewards[i].append(ep_rewards[i])
+                ep_rewards[i] = 0.0
+                # Reset hidden and state_seq for this env
+                hiddens[i] = agent.init_hidden(batch_size=1)
+                state_seqs[i] = deque([s2[i]] * seq_len, maxlen=seq_len)
+
+        s = s2
+
+    # Add remaining episode rewards
+    for i in range(num_envs):
+        if ep_rewards[i] != 0.0:
+            episode_rewards[i].append(ep_rewards[i])
+
+    all_ep_rewards = [r for env_rewards in episode_rewards for r in env_rewards]
+    avg_step_reward = float(np.mean(buffer.rewards[: buffer.max_i]))
+    avg_ep_reward = float(np.mean(all_ep_rewards)) if all_ep_rewards else 0.0
+    wall_time = time.time() - start_time
+    return buffer, avg_step_reward, avg_ep_reward, wall_time
 
 # ---------------------------------------------------------------------------
 # Loss functions
@@ -646,6 +731,161 @@ def train_ppo(
         print(f"PPO iter {k+1}/{iterations}: return={avg_return:.2f}  loss={avg_loss:.4f}  mean_std={mean_std:.4f}") 
     return policy, returns_per_iter, losses_per_iter
  
+def train_ensemble_critic(
+    epochs=300,
+    episodes=10,
+    updates=10,
+    critic_updates=80,
+    learning_rate=1e-4,
+    critic_lr=3e-4,
+    hidden_size=64,
+    batch_size=256,
+    seq_len=4,
+    gamma=0.975,
+    lam=0.95,
+    num_critics=3,
+):
+    """Policy gradient with ensemble critic baseline and GAE."""
+    env = gym.make("Pendulum-v1")
+    state_dim = 1
+    action_dim = env.action_space.shape[0]
+    ep_len = env.spec.max_episode_steps
+ 
+    policy = RecurrentActor(state_dim, hidden_size, action_dim)
+    critic = EnsembleCritic(state_dim, hidden_size, num_critics)
+    optimizer = torch.optim.Adam(policy.parameters(),  lr=learning_rate)
+    cr_optimizer = torch.optim.Adam(critic.parameters(), lr=critic_lr)
+ 
+    returns_per_epoch = []
+    actor_losses_per_epoch = []
+    critic_losses_per_epoch = []
+    for epoch in range(epochs):
+        with torch.no_grad():
+            buffer, _, avg_ep_rwd = collect_data(
+                episodes * ep_len, env, policy, seq_len=seq_len
+            )
+        buffer.calc_reward_to_go(gamma)
+ 
+        # normalize RTG targets for stable critic regression
+        all_rtg = buffer.ret_to_go[: buffer.max_i]
+        rtg_mean = all_rtg.mean()
+        rtg_std  = all_rtg.std() + 1e-8
+
+        # --- train critic ensemble ---
+        critic_loss_sum = 0.0
+        for _ in range(critic_updates):
+            states, _, _, rtg, _ = buffer.sample_sequence(batch_size, seq_len)
+            s_t = torch.as_tensor(states, dtype=torch.float32)
+            rtg_t = torch.as_tensor((rtg[:, -1:, :] - rtg_mean) / rtg_std, dtype=torch.float32)
+            cr_optimizer.zero_grad()
+            values, _ = critic(s_t) # shape (B, T, 1)
+            loss = mse_loss(values[:, -1:, :], rtg_t)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(critic.parameters(), max_norm=0.5)
+            cr_optimizer.step()
+            critic_loss_sum += loss.item()
+ 
+        # --- compute GAE over the full buffer ---
+        all_s = torch.as_tensor(buffer.states[: buffer.max_i], dtype=torch.float32)
+        all_s = all_s.unsqueeze(1) # (N, 1, 1) — T=1 per step
+        with torch.no_grad():
+            values, _ = critic(all_s)
+        values = values.squeeze().numpy().reshape(-1, 1)
+        values = values * rtg_std + rtg_mean  # convert back to reward scale for GAE
+ 
+        next_values = np.zeros_like(values)
+        next_values[:-1] = values[1:]
+        next_values[buffer.dones[: buffer.max_i, 0]] = 0.0
+ 
+        advantages = compute_gae(
+            buffer.rewards[: buffer.max_i],
+            values,
+            next_values,
+            buffer.dones[: buffer.max_i],
+            gamma, lam,
+        )
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+ 
+        # --- train actor with GAE advantages ---
+        actor_loss_sum = 0.0
+        for _ in range(updates):
+            states, actions, _, _, _ = buffer.sample_sequence(batch_size, seq_len)
+            idxs  = np.random.randint(0, buffer.max_i - seq_len, size=batch_size)
+            adv_s = np.array([advantages[i + seq_len - 1] for i in idxs]) # shape (B, 1)
+ 
+            s_t   = torch.as_tensor(states, dtype=torch.float32)
+            a_t   = torch.as_tensor(actions[:, -1, :], dtype=torch.float32)
+            adv_t = torch.as_tensor(adv_s, dtype=torch.float32)
+ 
+            optimizer.zero_grad()
+            loss = reinforce_adv_signal(policy, s_t, a_t, adv_t)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=0.5)
+            optimizer.step()
+            actor_loss_sum += loss.item()
+ 
+        returns_per_epoch.append(avg_ep_rwd)
+        actor_losses_per_epoch.append(actor_loss_sum / updates)
+        critic_losses_per_epoch.append(critic_loss_sum / critic_updates)
+        print(f"Ensemble critic epoch {epoch+1}/{epochs}: return={avg_ep_rwd:.2f}"
+              f"  actor_loss={actor_losses_per_epoch[-1]:.4f}"
+              f"  critic_loss={critic_losses_per_epoch[-1]:.4f}")
+ 
+    return policy, returns_per_epoch, actor_losses_per_epoch, critic_losses_per_epoch
+ 
+def train_parallel_collection(
+    epochs=300,
+    num_envs=4,
+    steps_per_epoch=1000,
+    updates=10,
+    learning_rate=1e-3,
+    hidden_size=64,
+    batch_size=256,
+    seq_len=4,
+    gamma=0.975,
+):
+    """VPG with parallel data collection across multiple environments."""
+    env = gym.make("Pendulum-v1")
+    state_dim  = 1
+    action_dim = env.action_space.shape[0]
+ 
+    policy = RecurrentActor(state_dim, hidden_size, action_dim)
+    optimizer = torch.optim.Adam(policy.parameters(), lr=learning_rate)
+ 
+    returns_per_epoch = []
+    losses_per_epoch  = []
+    times_per_epoch = []
+    for epoch in range(epochs):
+        with torch.no_grad():
+            buffer, avg_step_rwd, avg_ep_rwd, wall_time = collect_data_parallel(
+                steps_per_epoch, num_envs, policy, seq_len=seq_len
+            )
+        buffer.calc_reward_to_go(gamma)
+ 
+        epoch_loss = 0.0
+        for _ in range(updates):
+            states, actions, rewards, rtg, _ = buffer.sample_sequence(batch_size, seq_len)
+            s_t   = torch.as_tensor(states, dtype=torch.float32) # shape (B, T, 1)
+            a_t   = torch.as_tensor(actions[:, -1, :], dtype=torch.float32) # shape (B, A) last step
+            rtg_t = torch.as_tensor(rtg[:, -1, :], dtype=torch.float32) # shape (B, 1) last step
+ 
+            optimizer.zero_grad()
+            loss = reinforce_signal(policy, s_t, a_t, rtg_t, avg_step_rwd, use_avg=False)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=0.5)
+            optimizer.step()
+            epoch_loss += loss.item()
+ 
+        avg_loss = epoch_loss / updates
+        returns_per_epoch.append(avg_ep_rwd)
+        losses_per_epoch.append(avg_loss)
+        times_per_epoch.append(wall_time)
+        print(f"Parallel epoch {epoch+1}/{epochs}: return={avg_ep_rwd:.2f}  loss={avg_loss:.4f}  time={wall_time:.2f}s")
+ 
+    avg_time = sum(times_per_epoch) / len(times_per_epoch)
+    print(f"Average wall-clock time per epoch: {avg_time:.2f}s")
+    return policy, returns_per_epoch, losses_per_epoch, times_per_epoch
+ 
 if __name__ == "__main__":
     # --- Task 1: random policy ---
     env    = gym.make("Pendulum-v1")
@@ -696,4 +936,17 @@ if __name__ == "__main__":
     _, ret_ppo, loss_ppo = train_ppo(iterations=300, clip=True)
     plot_learning_curves({"PPO": ret_ppo}, title="Task 5: Full PPO", smooth=0.9)
     plot_loss_curves({"PPO": loss_ppo},    title="Task 5: PPO loss", smooth=0.9)
+ 
+    # --- Task 6: Ensemble critics ---
+    _, ret_ens, actor_losses_ens, critic_losses_ens = train_ensemble_critic(epochs=300, learning_rate=3e-4)
+    plot_learning_curves({"Ensemble critic": ret_ens}, title="Task 6: Ensemble critics", smooth=0.9)
+    plot_loss_curves(
+        {"Ensemble actor": actor_losses_ens, "Ensemble critic": critic_losses_ens},
+        title="Task 6: Ensemble critic loss curves", smooth=0.9,
+    )
+ 
+    # --- Task 7: Parallel data collection ---
+    _, ret_par, loss_par, times_par = train_parallel_collection(epochs=300, learning_rate=3e-4)
+    plot_learning_curves({"Parallel collection": ret_par}, title="Task 7: Parallel data collection", smooth=0.9)
+    plot_loss_curves({"Parallel": loss_par}, title="Task 7: Parallel loss", smooth=0.9)
     
